@@ -141,11 +141,52 @@ def is_skip_image(src: str) -> bool:
     return False
 
 
+def get_image_context(img_tag) -> str:
+    """
+    Get the textual context around an image tag.
+    Looks at alt text, parent figure caption, and nearby headings/text.
+    """
+    parts = []
+
+    # Alt text
+    alt = img_tag.get("alt", "")
+    if alt:
+        parts.append(alt)
+
+    # Check parent <figure> for <figcaption>
+    figure = img_tag.find_parent("figure")
+    if figure:
+        caption = figure.find("figcaption")
+        if caption:
+            parts.append(caption.get_text(strip=True))
+
+    # Walk up to find the nearest heading or bold text before this image
+    for parent in img_tag.parents:
+        # Look for a heading before this element
+        prev = parent.find_previous_sibling(re.compile(r"h[1-6]|strong|b"))
+        if prev:
+            parts.append(prev.get_text(strip=True))
+            break
+        # Also check previous siblings for any text containing puzzle keywords
+        prev_sib = parent.find_previous_sibling()
+        if prev_sib:
+            text = prev_sib.get_text(strip=True)
+            if text and len(text) < 200:
+                parts.append(text)
+            break
+
+    return " ".join(parts)
+
+
 def extract_puzzle_images(
-    session: requests.Session, article_url: str, verbose: bool = False
+    session: requests.Session,
+    article_url: str,
+    filter_keyword: str = "",
+    verbose: bool = False,
 ) -> list[str]:
     """
     Fetch an article page and extract puzzle image URLs from the article body.
+    If filter_keyword is set, only return images whose surrounding text matches.
     Returns a list of image URLs.
     """
     try:
@@ -156,86 +197,50 @@ def extract_puzzle_images(
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    image_urls = []
 
-    # Strategy 1: Find images with alt text containing puzzle-related words
-    puzzle_alt_keywords = ["תשבצ", "תשבץ", "פאזל", "puzzle", "חידה"]
+    # Collect all candidate images with their context
+    candidates = []  # list of (url, context_text)
+
     for img in soup.find_all("img"):
-        alt = img.get("alt", "")
         src = img.get("src", "")
-        if any(kw in alt for kw in puzzle_alt_keywords) and IMAGE_HOST in src:
-            if not is_skip_image(src):
-                image_urls.append(src)
-                if verbose:
-                    print(f"  [strategy:alt-text] Found: {src}")
+        if not src or IMAGE_HOST not in src:
+            continue
+        if is_skip_image(src):
+            continue
+        # Skip small thumbnails
+        width_match = re.search(r"width=(\d+)", src)
+        if width_match and int(width_match.group(1)) < 400:
+            continue
 
-    # Strategy 2: Find images inside article body wrapper
-    if not image_urls:
-        body = soup.find(attrs={"class": re.compile(r"article.?body", re.I)})
-        if body:
-            for img in body.find_all("img"):
-                src = img.get("src", "")
-                if IMAGE_HOST in src and not is_skip_image(src):
-                    image_urls.append(src)
-                    if verbose:
-                        print(f"  [strategy:body-wrapper] Found: {src}")
+        context = get_image_context(img)
+        candidates.append((src, context))
+        if verbose:
+            print(f"  [candidate] context='{context[:80]}' url={src}")
 
-    # Strategy 3: Look for <picture> elements with puzzle images
-    if not image_urls:
-        for picture in soup.find_all("picture"):
-            for source in picture.find_all("source"):
-                srcset = source.get("srcset", "")
-                if IMAGE_HOST in srcset:
-                    parts = srcset.split(",")
-                    urls = []
-                    for part in parts:
-                        part = part.strip()
-                        url_part = part.split()[0] if part else ""
-                        if url_part and IMAGE_HOST in url_part:
-                            urls.append(url_part)
-                    if urls:
-                        candidate = urls[-1]  # Last is usually largest
-                        if not is_skip_image(candidate):
-                            image_urls.append(candidate)
-                            if verbose:
-                                print(f"  [strategy:picture-srcset] Found: {candidate}")
-
-            for img in picture.find_all("img"):
-                src = img.get("src", "")
-                if IMAGE_HOST in src and not is_skip_image(src):
-                    image_urls.append(src)
-                    if verbose:
-                        print(f"  [strategy:picture-img] Found: {src}")
-
-    # Strategy 4: Broader scan - look for large content images, skip thumbnails
-    if not image_urls:
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if not (IMAGE_HOST in src and "/bs/" in src):
-                continue
-            if is_skip_image(src):
-                continue
-            # Skip small thumbnails (sidebar/related articles images)
-            width_match = re.search(r"width=(\d+)", src)
-            if width_match and int(width_match.group(1)) < 400:
-                if verbose:
-                    print(f"  [strategy:broad-scan] Skipped thumbnail: {src}")
-                continue
-            image_urls.append(src)
+    # Filter by keyword if specified
+    if filter_keyword and candidates:
+        filtered = [
+            (url, ctx) for url, ctx in candidates
+            if filter_keyword in ctx
+        ]
+        if filtered:
+            candidates = filtered
             if verbose:
-                print(f"  [strategy:broad-scan] Found: {src}")
+                print(f"  [filter] Matched {len(filtered)} image(s) for '{filter_keyword}'")
+        else:
+            if verbose:
+                print(f"  [filter] No images matched '{filter_keyword}', using all candidates")
 
     # Deduplicate while preserving order
     seen = set()
     unique_urls = []
-    for url in image_urls:
+    for url, _ctx in candidates:
         base = url.split("?")[0]
         if base not in seen:
             seen.add(base)
             unique_urls.append(url)
 
     if verbose and not unique_urls:
-        # Show what images *were* found (even skipped ones) for debugging
         all_imgs = [
             img.get("src", "")
             for img in soup.find_all("img")
@@ -306,6 +311,11 @@ Cookie file:
         help="Maximum number of listing pages to scan (default: 20)",
     )
     parser.add_argument(
+        "--filter", default="תשבץ",
+        help="Only download images matching this keyword in nearby text "
+             "(default: 'תשבץ' = crossword only). Use --filter '' for all images.",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Show detailed debug output for image extraction",
     )
@@ -359,7 +369,11 @@ Cookie file:
         print(f"Processing puzzle for {date_str}...")
         print(f"  URL: {article['url']}")
 
-        images = extract_puzzle_images(session, article["url"], verbose=args.verbose)
+        images = extract_puzzle_images(
+            session, article["url"],
+            filter_keyword=args.filter,
+            verbose=args.verbose,
+        )
         if not images:
             print("  WARNING: No puzzle images found on this page.")
             print("  (This may be a paywall issue - check your cookies.)")
@@ -372,7 +386,7 @@ Cookie file:
                 ext = url_path.split("/")[-1].rsplit(".", 1)[-1].lower()
 
             suffix = f"_{i+1}" if len(images) > 1 else ""
-            filename = f"puzzle_{date_str}{suffix}.{ext}"
+            filename = f"tashbetz_{date_str}{suffix}.{ext}"
             output_path = os.path.join(args.output, filename)
 
             print(f"  Downloading image to {output_path}...")
