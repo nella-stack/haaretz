@@ -311,9 +311,10 @@ Cookie file:
         help="Maximum number of listing pages to scan (default: 20)",
     )
     parser.add_argument(
-        "--filter", default="תשבץ",
+        "--filter", default="3תשבץ",
         help="Only download images matching this keyword in nearby text "
-             "(default: 'תשבץ' = crossword only). Use --filter '' for all images.",
+             "(default: '3תשבץ' = crossword #3 only). "
+             "Use '1תשבץ' for #1, 'תשבץ' for all crosswords, '' for all images.",
     )
     parser.add_argument(
         "--verbose", action="store_true",
