@@ -69,62 +69,80 @@ def extract_date_from_url(url: str) -> datetime | None:
     return None
 
 
-def find_puzzle_articles(session: requests.Session, max_pages: int = 20) -> list[dict]:
+def find_puzzle_articles(
+    session: requests.Session,
+    from_date: datetime,
+    to_date: datetime,
+) -> list[dict]:
     """
-    Scrape the puzzle section listing page(s) to find all article URLs.
+    Find all puzzle article URLs from Haaretz sitemaps.
+    Each monthly sitemap (e.g. sitemap-202501.xml) contains article URLs
+    with their full paths including UUIDs.
     Returns a list of dicts: {"url": str, "date": datetime, "title": str}
     """
     articles = []
     seen_urls = set()
 
-    for page_num in range(1, max_pages + 1):
-        url = SECTION_URL if page_num == 1 else f"{SECTION_URL}?page={page_num}"
-        print(f"Fetching listing page {page_num}...")
+    # Generate YYYYMM strings for each month in the date range
+    # (include one month before and after to catch edge cases)
+    months = set()
+    d = from_date.replace(day=1)
+    end = to_date.replace(day=1)
+    while d <= end:
+        months.add(d.strftime("%Y%m"))
+        # Also add previous month for articles published at month boundary
+        if d.month == 1:
+            months.add(f"{d.year - 1}12")
+        else:
+            months.add(f"{d.year}{d.month - 1:02d}")
+        if d.month == 12:
+            d = d.replace(year=d.year + 1, month=1)
+        else:
+            d = d.replace(month=d.month + 1)
+    # Add the month after to_date too
+    if to_date.month == 12:
+        months.add(f"{to_date.year + 1}01")
+    else:
+        months.add(f"{to_date.year}{to_date.month + 1:02d}")
+
+    pattern = re.compile(
+        r"<loc>([^<]*haaretzlogicpuzzle[^<]*)</loc>"
+    )
+
+    for month in sorted(months):
+        sitemap_url = f"{BASE_URL}/sitemap-{month}.xml"
+        print(f"Fetching sitemap {month}...")
 
         try:
-            resp = session.get(url, headers=HEADERS, timeout=30)
+            resp = session.get(sitemap_url, timeout=30)
+            if resp.status_code == 404:
+                print(f"  Sitemap not found (future month?), skipping.")
+                continue
             resp.raise_for_status()
         except requests.RequestException as e:
-            print(f"  Error fetching page {page_num}: {e}")
-            break
+            print(f"  Error fetching sitemap: {e}")
+            continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Find all links that match the puzzle article URL pattern
+        urls = pattern.findall(resp.text)
         new_count = 0
-        for link in soup.find_all("a", href=True):
-            href = link["href"]
-            if "/magazine/haaretzlogicpuzzle/" not in href:
+        for url in urls:
+            if url in seen_urls:
                 continue
-            if "/ty-article" not in href:
-                continue
+            seen_urls.add(url)
 
-            full_url = urljoin(BASE_URL, href)
-            if full_url in seen_urls:
-                continue
-            seen_urls.add(full_url)
-
-            article_date = extract_date_from_url(full_url)
+            article_date = extract_date_from_url(url)
             if not article_date:
                 continue
 
-            # Try to get the title from the link text or parent elements
-            title = link.get_text(strip=True) or ""
-
             articles.append({
-                "url": full_url,
+                "url": url,
                 "date": article_date,
-                "title": title,
+                "title": "",
             })
             new_count += 1
 
-        print(f"  Found {new_count} new article(s) on page {page_num}")
-
-        if new_count == 0:
-            print("  No new articles found, stopping pagination.")
-            break
-
-        time.sleep(1)  # Be polite
+        print(f"  Found {new_count} puzzle article(s)")
+        time.sleep(0.5)
 
     articles.sort(key=lambda a: a["date"])
     return articles
@@ -315,10 +333,6 @@ Cookie file:
         help="Output directory for downloaded puzzles (default: ./puzzles)",
     )
     parser.add_argument(
-        "--max-pages", type=int, default=20,
-        help="Maximum number of listing pages to scan (default: 20)",
-    )
-    parser.add_argument(
         "--filter", default="3תשבץ",
         help="Only download images matching this keyword in nearby text "
              "(default: '3תשבץ' = crossword #3 only). "
@@ -354,8 +368,8 @@ Cookie file:
 
     print(f"Searching for puzzles from {from_date.date()} to {to_date.date()}...\n")
 
-    # Find all articles from the listing page(s)
-    all_articles = find_puzzle_articles(session, max_pages=args.max_pages)
+    # Find all articles from sitemaps
+    all_articles = find_puzzle_articles(session, from_date, to_date)
     print(f"\nFound {len(all_articles)} total puzzle article(s).\n")
 
     # Filter to requested date range
