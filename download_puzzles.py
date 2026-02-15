@@ -254,9 +254,10 @@ def extract_puzzle_images(
 
 
 def get_full_res_url(image_url: str) -> str:
-    """Remove width/height constraints from image URL to get full resolution."""
-    base = image_url.split("?")[0]
-    return base
+    """Replace width/height in image URL with full resolution values."""
+    url = re.sub(r"width=\d+", "width=1180", image_url)
+    url = re.sub(r"height=\d+", "height=1557", url)
+    return url
 
 
 def download_image(
