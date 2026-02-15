@@ -253,14 +253,21 @@ def extract_puzzle_images(
     return unique_urls
 
 
+def get_full_res_url(image_url: str) -> str:
+    """Remove width/height constraints from image URL to get full resolution."""
+    base = image_url.split("?")[0]
+    return base
+
+
 def download_image(
     session: requests.Session,
     image_url: str,
     output_path: str,
 ) -> bool:
-    """Download an image to the specified path. Tries original URL as-is."""
+    """Download an image at full resolution."""
+    full_res = get_full_res_url(image_url)
     try:
-        resp = session.get(image_url, headers=HEADERS, timeout=60, stream=True)
+        resp = session.get(full_res, headers=HEADERS, timeout=60, stream=True)
         resp.raise_for_status()
 
         content_length = resp.headers.get("Content-Length")
